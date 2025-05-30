@@ -1,7 +1,7 @@
 # Breaklines
 
 A Python utility that inserts line breaks in text files to ensure no line exceeds a specified
-character limit.
+character limit. Useful for AI-generated text which often overflows the code editor window. 
 
 ## Description
 
