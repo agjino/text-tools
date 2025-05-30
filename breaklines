@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import shutil
+
+
+def break_line(line, max_chars):
+    broken_lines = []
+    while len(line) > max_chars:
+        # Find the last space before the limit
+        break_pos = line.rfind(' ', 0, max_chars + 1)
+        if break_pos == -1:
+            break_pos = max_chars  # No space found, break at max_chars
+        broken_lines.append(line[:break_pos].rstrip())
+        line = line[break_pos:].lstrip()
+    broken_lines.append(line)
+    return broken_lines
+
+
+def process_file(filename, max_chars, inplace=False):
+    # Generate temporary filename for output
+    temp_filename = f"{filename}.tmp"
+    
+    with open(filename, 'r', encoding='utf-8') as infile, \
+         open(temp_filename, 'w', encoding='utf-8') as outfile:
+        for line in infile:
+            line = line.rstrip('\n')
+            broken = break_line(line, max_chars)
+            for b in broken:
+                outfile.write(b + '\n')
+
+    if not inplace:
+        # Backup original before replacing
+        shutil.move(filename, f"{filename}_bak")
+        print(f"Original file backed up to: {filename}_bak")
+
+    shutil.move(temp_filename, filename)
+
+    if inplace:
+        print(f"File processed in-place: {filename}")
+
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    if len(sys.argv) < 2:
+        print("Usage: breaklines <filename> [max_chars] [--inplace]")
+        sys.exit(1)
+    
+    filename = sys.argv[1]
+    max_chars = 100  # Default value
+    inplace = False
+    
+    # Parse remaining arguments
+    for arg in sys.argv[2:]:
+        if arg == "--inplace":
+            inplace = True
+        else:
+            try:
+                max_chars = int(arg)
+            except ValueError:
+                print(f"Error: '{arg}' is not a valid integer for max_chars.")
+                sys.exit(1)
+    
+    if not os.path.isfile(filename):
+        print(f"Error: File '{filename}' not found.")
+        sys.exit(1)
+    
+    process_file(filename, max_chars, inplace)
