@@ -1,0 +1,325 @@
+#!/usr/bin/env python3
+
+"""
+M3U Filter Tool
+
+This script parses an M3U playlist file, filters its channels based on criteria
+defined in a JSON file, and performs optional post-processing actions.
+"""
+
+import argparse
+import json
+import sys
+from typing import Dict, List, Optional, Set, Any
+
+
+class Channel:
+    """Represents a channel entry in an M3U playlist."""
+
+    def __init__(self, extinf_line: str, url_line: str):
+        self.extinf_line = extinf_line
+        self.url = url_line.strip()
+
+        # Parse attributes from the EXTINF line
+        self.attributes = {}
+
+        # Extract attributes using string operations
+        # First, get the part before the channel name (before the last comma)
+        if ',' in extinf_line:
+            attributes_part = extinf_line.split(',')[0]
+            self.attributes["channel_name"] = extinf_line.split(',', 1)[1].strip()
+        else:
+            attributes_part = extinf_line
+            self.attributes["channel_name"] = ""
+
+        # Find all attribute="value" patterns
+        i = 0
+        while i < len(attributes_part):
+            # Find the next attribute
+            attr_start = attributes_part.find('="', i)
+            if attr_start == -1:
+                break
+
+            # Look backward to find the attribute name start
+            attr_name_start = attr_start
+            while attr_name_start > 0 and attributes_part[attr_name_start-1] != ' ':
+                attr_name_start -= 1
+
+            attr_name = attributes_part[attr_name_start:attr_start]
+
+            # Find the end of the value (closing quote)
+            value_start = attr_start + 2
+            value_end = attributes_part.find('"', value_start)
+            if value_end == -1:
+                break
+
+            attr_value = attributes_part[value_start:value_end]
+            self.attributes[attr_name] = attr_value
+
+            # Move past this attribute
+            i = value_end + 1
+
+    def get_attribute(self, attr_name: str) -> str:
+        """Get the value of an attribute, or empty string if not found."""
+        if attr_name == "url":
+            return self.url
+        elif attr_name == "name":
+            return self.attributes.get("channel_name", "")
+        return self.attributes.get(attr_name, "")
+
+
+def parse_m3u(file_path: str) -> List[Channel]:
+    """Parse an M3U file and return a list of Channel objects."""
+    channels = []
+
+    with open(file_path, 'r', encoding='utf-8') as file:
+        lines = file.readlines()
+
+    i = 0
+    # Skip the header line if it exists
+    if lines and lines[0].strip() == "#EXTM3U":
+        i = 1
+
+    while i < len(lines) - 1:
+        line = lines[i].strip()
+        if line.startswith("#EXTINF:"):
+            url_line = lines[i + 1].strip()
+            channels.append(Channel(line, url_line))
+            i += 2
+        else:
+            i += 1
+
+    return channels
+
+
+def validate_specs(specs: Dict[str, Any]) -> None:
+    """Validate the specs JSON structure."""
+    if "accept" not in specs:
+        raise ValueError("Missing required 'accept' key in JSON")
+
+    if not isinstance(specs["accept"], list):
+        raise ValueError("'accept' must be an array")
+
+    valid_operators = {
+        "includes", "starts-with", "equals",
+        "not-includes", "not-starts-with", "not-equals"
+    }
+
+    for spec in specs["accept"]:
+        if not isinstance(spec, dict):
+            raise ValueError("Each criterion must be an object")
+
+        if "filters" not in spec:
+            raise ValueError("Missing required 'filters' key in criterion")
+
+        if not isinstance(spec["filters"], list):
+            raise ValueError("'filters' must be an array")
+
+        for filter_item in spec["filters"]:
+            if not isinstance(filter_item, dict):
+                raise ValueError("Each filter must be an object")
+
+            if "attribute" not in filter_item:
+                raise ValueError("Missing required 'attribute' key in filter")
+
+            if "operator" not in filter_item:
+                raise ValueError("Missing required 'operator' key in filter")
+
+            if filter_item["operator"] not in valid_operators:
+                raise ValueError(f"Invalid operator: {filter_item['operator']}")
+
+            if "values" not in filter_item:
+                raise ValueError("Missing required 'values' key in filter")
+
+            if not isinstance(filter_item["values"], list):
+                raise ValueError("'values' must be an array of strings")
+
+    if "postProcess" in specs:
+        if not isinstance(specs["postProcess"], list):
+            raise ValueError("'postProcess' must be an array")
+
+        for action in specs["postProcess"]:
+            if not isinstance(action, dict):
+                raise ValueError("Each action must be an object")
+
+            if "action" not in action:
+                raise ValueError("Missing required 'action' key in action")
+
+            if action["action"] == "deduplicate":
+                if "by" not in action:
+                    raise ValueError("Missing required 'by' key in deduplicate action")
+
+            elif action["action"] == "sort":
+                if "by" not in action:
+                    raise ValueError("Missing required 'by' key in sort action")
+                if "order" in action and action["order"] not in {"asc", "desc"}:
+                    raise ValueError(f"Invalid 'order' value: {action['order']}")
+
+            else:
+                raise ValueError(f"Invalid action: {action['action']}")
+
+
+def filter_channels(channels: List[Channel], specs: Dict[str, Any]) -> List[Channel]:
+    """Filter channels based on the criteria."""
+    filtered_channels = []
+
+    for channel in channels:
+        # A channel is included if it passes any of the acceptance criteria
+        for criterion in specs["accept"]:
+            filters = criterion["filters"]
+
+            # The channel must pass all filters in this criterion
+            all_filters_passed = True
+
+            for filter_item in filters:
+                attribute = filter_item["attribute"]
+                operator = filter_item["operator"]
+                values = filter_item["values"]
+
+                channel_attr_value = channel.get_attribute(attribute).lower()
+                filter_passed = False
+
+                for val in values:
+                    val = val.lower()  # Case-insensitive comparison
+
+                    if operator == "includes" and val in channel_attr_value:
+                        filter_passed = True
+                        break
+                    elif (operator == "starts-with" or operator == "start-with") and channel_attr_value.startswith(val):
+                        filter_passed = True
+                        break
+                    elif operator == "equals" and channel_attr_value == val:
+                        filter_passed = True
+                        break
+                    elif operator == "not-includes" and val not in channel_attr_value:
+                        filter_passed = True
+                        break
+                    elif (operator == "not-starts-with" or operator == "not-start-with") and not channel_attr_value.startswith(val):
+                        filter_passed = True
+                        break
+                    elif operator == "not-equals" and channel_attr_value != val:
+                        filter_passed = True
+                        break
+
+                # If any filter fails, the whole criterion fails
+                if not filter_passed:
+                    all_filters_passed = False
+                    break
+
+            # If all filters passed, the channel is accepted
+            if all_filters_passed:
+                filtered_channels.append(channel)
+                break  # No need to check other criteria
+
+    return filtered_channels
+
+
+def apply_post_processing(channels: List[Channel], specs: Dict[str, Any]) -> List[Channel]:
+    """Apply post-filtering actions to the channel list."""
+    if "postProcess" not in specs:
+        return channels
+
+    result = channels
+
+    for action in specs["postProcess"]:
+        action_type = action["action"]
+
+        if action_type == "deduplicate":
+            by_attr = action["by"]
+            seen_values = set()
+            deduplicated = []
+
+            for channel in result:
+                attr_value = channel.get_attribute(by_attr)
+                if attr_value not in seen_values:
+                    seen_values.add(attr_value)
+                    deduplicated.append(channel)
+
+            result = deduplicated
+
+        elif action_type == "sort":
+            by_attr = action["by"]
+            order = action.get("order", "asc")
+
+            result.sort(
+                key=lambda ch: ch.get_attribute(by_attr).lower(),
+                reverse=(order == "desc")
+            )
+
+    return result
+
+
+def generate_m3u_content(channels: List[Channel]) -> str:
+    """Generate M3U file content from a list of channels."""
+    lines = ["#EXTM3U"]
+
+    for channel in channels:
+        lines.append(channel.extinf_line)
+        lines.append(channel.url)
+
+    return "\n".join(lines)
+
+
+def main():
+    """Main entry point for the script."""
+    parser = argparse.ArgumentParser(description="Filter M3U playlist files based on specifications")
+    parser.add_argument("input_file", help="Path to the source M3U file")
+    parser.add_argument("-s", "--specs", required=True, help="Path to the JSON specifications file")
+
+    output_group = parser.add_mutually_exclusive_group()
+    output_group.add_argument("-o", "--output", help="Path to write the filtered M3U file")
+    output_group.add_argument("--count", action="store_true", help="Print only the count of matching channels")
+    output_group.add_argument("--list-values", metavar="ATTRIBUTE", help="Print list of unique values for the specified attribute")
+
+    args = parser.parse_args()
+
+    # Load and validate criteria
+    try:
+        with open(args.specs, 'r', encoding='utf-8') as f:
+            specs = json.load(f)
+        validate_specs(specs)
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"Error in specifications file: {e}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print(f"Specifications file not found: {args.specs}", file=sys.stderr)
+        sys.exit(1)
+
+    # Parse M3U file
+    try:
+        channels = parse_m3u(args.input_file)
+    except FileNotFoundError:
+        print(f"Input file not found: {args.input_file}", file=sys.stderr)
+        sys.exit(1)
+
+    # Filter channels
+    filtered_channels = filter_channels(channels, specs)
+
+    # Apply post-processing
+    final_channels = apply_post_processing(filtered_channels, specs)
+
+    # Output
+    if args.count:
+        print(len(final_channels))
+    elif args.list_values:
+        # Collect unique values for the specified attribute
+        unique_values = set()
+        for channel in final_channels:
+            value = channel.get_attribute(args.list_values)
+            if value:  # Only add non-empty values
+                unique_values.add(value)
+
+        # Print the unique values, one per line
+        for value in sorted(unique_values):
+            print(value)
+    else:
+        m3u_content = generate_m3u_content(final_channels)
+        if args.output:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write(m3u_content)
+        else:
+            print(m3u_content)
+
+
+if __name__ == "__main__":
+    main()
